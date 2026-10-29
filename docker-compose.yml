@@ -1,0 +1,47 @@
+services:
+  mail:
+    build: .
+    image: mailwatch-ews:latest
+    container_name: mailwatch-ews
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # ----- mailbox (required) -----
+      MAILWATCH_EWS_SERVER: ${EWS_SERVER:?set your Exchange/EWS host}
+      MAILWATCH_EWS_USERNAME: ${EWS_USERNAME:?set DOMAIN\\user}
+      MAILWATCH_EWS_PASSWORD: ${EWS_PASSWORD:?set password}
+      MAILWATCH_EWS_MAILBOX: ${EWS_MAILBOX:?set mailbox address}
+      MAILWATCH_EWS_BUILD: ${EWS_BUILD:-15.2.2562}
+      # ----- web API -----
+      MAILWATCH_EWS_API_PORT: "18661"
+      MAILWATCH_PANEL_USER: ${PANEL_USER:?set UI login user}
+      MAILWATCH_PANEL_PASSWORD: ${PANEL_PASSWORD:?set UI login password}
+      # ----- postgres (matches the compose db below) -----
+      MAILWATCH_PG_DSN: host=db port=5432 dbname=mailwatch user=mailwatch password=${POSTGRES_PASSWORD:?set pg password}
+      # ----- storage quota -----
+      MAILWATCH_MAX_STORAGE_BYTES: ${MAX_STORAGE:-100G}
+      MAILWATCH_STORAGE_TARGET_BYTES: ${TARGET_STORAGE:-95G}
+      MAILWATCH_CLEANUP_INTERVAL: "60"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "${MAIL_PORT:-18661}:18661"
+  db:
+    image: postgres:18-alpine
+    container_name: mailwatch-ews-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mailwatch
+      POSTGRES_USER: mailwatch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set pg password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailwatch -d mailwatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  pgdata:
