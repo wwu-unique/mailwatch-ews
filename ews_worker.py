@@ -320,6 +320,9 @@ def apply_db_quota() -> None:
             target = max(int(target_raw), parse_size("1G"))
             if target < STORAGE_LIMIT_BYTES:
                 STORAGE_TARGET_BYTES = target
+        elif limit_raw:
+            # 上限变了但未显式设置目标：默认收缩到上限的 95%，保持清理器语义
+            STORAGE_TARGET_BYTES = int(STORAGE_LIMIT_BYTES * 0.95)
     except (TypeError, ValueError):
         LOG.warning("stored quota settings invalid; keeping current values")
     update_state(
@@ -782,7 +785,11 @@ def vacuum_storage_tables() -> None:
 
 def enforce_storage_limit(force: bool = False) -> dict[str, int]:
     """Delete oldest messages until the configured content quota is met."""
+    effective_target = min(
+        STORAGE_TARGET_BYTES, int(STORAGE_LIMIT_BYTES * 0.95)
+    )
     metrics = storage_metrics()
+    metrics["target"] = effective_target
     if not force and metrics["used"] <= STORAGE_LIMIT_BYTES:
         return metrics
     if not STORAGE_LOCK.acquire(blocking=False):
@@ -792,7 +799,7 @@ def enforce_storage_limit(force: bool = False) -> dict[str, int]:
     try:
         while True:
             metrics = storage_metrics()
-            if metrics["used"] <= STORAGE_TARGET_BYTES:
+            if metrics["used"] <= effective_target:
                 break
             conn = db()
             try:
@@ -846,7 +853,7 @@ def enforce_storage_limit(force: bool = False) -> dict[str, int]:
                 "storage cleanup deleted=%s used=%s target=%s limit=%s",
                 deleted,
                 metrics["used"],
-                STORAGE_TARGET_BYTES,
+                effective_target,
                 STORAGE_LIMIT_BYTES,
             )
         return metrics
