@@ -131,6 +131,10 @@ STREAM_EVENT_TYPES = (
 
 STOP_EVENT = threading.Event()
 SYNC_EVENT = threading.Event()
+RELOAD_EVENT = threading.Event()  # set while collectors must stop for a settings change (they exit, then new ones start)
+SETTINGS_LOCK = threading.Lock()
+COLLECT_THREADS: list[threading.Thread] = []
+
 STATE_LOCK = threading.Lock()
 STORAGE_LOCK = threading.Lock()
 SEND_LOCK = threading.Lock()
@@ -280,8 +284,52 @@ def ensure_dirs() -> None:
             pass
 
 
+SETTINGS_META_KEY = "account_settings"
+QUOTA_LIMIT_META_KEY = "quota_max_bytes"
+QUOTA_TARGET_META_KEY = "quota_target_bytes"
+
+
+def load_db_settings() -> dict[str, Any]:
+    """Account settings saved through the web settings UI (stored in meta)."""
+    try:
+        raw = meta_get(SETTINGS_META_KEY)
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_db_settings(payload: dict[str, Any]) -> None:
+    meta_set(SETTINGS_META_KEY, json.dumps(payload))
+
+
+def apply_db_quota() -> None:
+    """Make UI-saved storage quota the runtime truth (大于 1 GiB 才接受)."""
+    global STORAGE_LIMIT_BYTES, STORAGE_TARGET_BYTES
+    limit_raw = meta_get(QUOTA_LIMIT_META_KEY)
+    target_raw = meta_get(QUOTA_TARGET_META_KEY)
+    try:
+        if limit_raw:
+            STORAGE_LIMIT_BYTES = max(int(limit_raw), parse_size("1G"))
+        if target_raw:
+            target = max(int(target_raw), parse_size("1G"))
+            if target < STORAGE_LIMIT_BYTES:
+                STORAGE_TARGET_BYTES = target
+    except (TypeError, ValueError):
+        LOG.warning("stored quota settings invalid; keeping current values")
+    update_state(
+        storage_limit_bytes=STORAGE_LIMIT_BYTES,
+        storage_target_bytes=STORAGE_TARGET_BYTES,
+    )
+
+
 def load_config() -> dict[str, Any]:
-    """Load account settings from an optional JSON file, then env overrides."""
+    """配置优先级：config.json 文件 < 环境变量 < Web 界面保存（DB meta）。"""
     config: dict[str, Any] = {}
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open(encoding="utf-8") as handle:
@@ -298,6 +346,11 @@ def load_config() -> dict[str, Any]:
         value = os.environ.get(env_name)
         if value:
             config[key] = value
+    db_settings = load_db_settings()
+    for key in ("username", "password", "mailbox", "server"):
+        value = db_settings.get(key)
+        if value:
+            config[key] = value
     missing = [
         key
         for key in ("username", "password", "mailbox", "server")
@@ -305,8 +358,8 @@ def load_config() -> dict[str, Any]:
     ]
     if missing:
         raise RuntimeError(
-            f"missing mail account settings ({CONFIG_PATH} file or env): "
-            + ", ".join(missing)
+            f"missing mail account settings {', '.join(missing)} "
+            "(config.json / env / web settings)"
         )
     return config
 
@@ -1422,9 +1475,9 @@ def is_session_limit_error(error: Exception) -> bool:
 
 def sync_worker(account: Any) -> None:
     consecutive_errors = 0
-    while not STOP_EVENT.is_set():
+    while not (STOP_EVENT.is_set() or RELOAD_EVENT.is_set()):
         SYNC_EVENT.wait(timeout=FALLBACK_SYNC_SECONDS)
-        if STOP_EVENT.is_set():
+        if STOP_EVENT.is_set() or RELOAD_EVENT.is_set():
             break
         SYNC_EVENT.clear()
         try:
@@ -1449,7 +1502,7 @@ def sync_worker(account: Any) -> None:
 
 def stream_worker(account: Any) -> None:
     errors = 0
-    while not STOP_EVENT.is_set():
+    while not (STOP_EVENT.is_set() or RELOAD_EVENT.is_set()):
         try:
             with account.inbox.streaming_subscription(
                 event_types=STREAM_EVENT_TYPES
@@ -2135,6 +2188,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise ApiError(401, "unauthorized")
             if path in {"/", "/health", "/api/health"}:
                 self.send_json(200, {"status": "ok", **api_summary()})
+            elif path == "/api/settings":
+                self.send_json(200, settings_overview())
             elif path == "/api/summary":
                 self.send_json(200, api_summary())
             elif path == "/api/mails":
@@ -2257,6 +2312,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if not self.authorized(query):
                 raise ApiError(401, "unauthorized")
+            if path == "/api/settings":
+                payload = self.read_json_body()
+                self.send_json(200, api_settings(payload))
+                return
             if path == "/api/logout":
                 provided = self.headers.get("X-Panel-Token") or query.get("token")
                 panel_logout(provided)
@@ -2304,6 +2363,173 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, stop_handler)
 
 
+def ingest_bootstrap(account: Any) -> None:
+    """Backfill / prime / first incremental for a freshly connected account."""
+    if INITIAL_BACKFILL and meta_get("backfill_done") != "1":
+        initial_backfill(account)
+    else:
+        update_state(backfill_done=meta_get("backfill_done") == "1")
+    prime_sync_state(account)
+    if INITIAL_BACKFILL:
+        meta_set("backfill_done", "1")
+    sync_incremental(account)
+    update_state(phase="running")
+    LOG.info("initial synchronization complete")
+
+
+def ingest_start(config: dict[str, Any]) -> int:
+    """为已配置的账号启动整套采集；失败保持 API 存活（phase=failed）。"""
+    global EWS_ACCOUNT, COLLECT_THREADS
+    try:
+        account = build_account(config)
+        EWS_ACCOUNT = account
+        LOG.info("EWS account created")
+        ingest_bootstrap(account)
+    except Exception as exc:
+        LOG.exception("initial EWS setup failed")
+        record_attempt(False, exc)
+        update_state(phase="failed")
+        return 1
+    COLLECT_THREADS = [
+        threading.Thread(target=stream_worker, args=(account,), daemon=True),
+        threading.Thread(target=sync_worker, args=(account,), daemon=True),
+    ]
+    for thread in COLLECT_THREADS:
+        thread.start()
+    return 0
+
+
+def churn_collectors(old_mailbox: str) -> None:
+    """设置变更后的采集线程热重载：停旧线程、必要时回填、再起新线程。"""
+    global EWS_ACCOUNT, COLLECT_THREADS
+    with SETTINGS_LOCK:
+        merged = {**MAIL_SETTINGS}
+        try:
+            account = build_account(merged)
+        except Exception as exc:
+            LOG.exception("settings save: account build failed")
+            raise ApiError(502, f"账号验证失败: {exc}") from exc
+
+        if old_mailbox and old_mailbox != merged.get("mailbox"):
+            meta_set("item_sync_state", None)
+            meta_set("backfill_done", "0")
+        if not old_mailbox or old_mailbox != merged.get("mailbox"):
+            # 首次配置或换邮箱：默认整箱回填（对大邮箱耗时与首启同量级）
+            try:
+                ingest_bootstrap(account)
+            except Exception as exc:
+                LOG.exception("settings save: bootstrap failed")
+                record_attempt(False, exc)
+                update_state(phase="failed")
+                raise ApiError(502, f"采集启动失败: {exc}") from exc
+
+        RELOAD_EVENT.set()
+        deadline = time.monotonic() + 15
+        lingering_before = len(COLLECT_THREADS)
+        for thread in COLLECT_THREADS:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        lingering = [t for t in COLLECT_THREADS if t.is_alive()]
+        COLLECT_THREADS = [t for t in lingering]
+        RELOAD_EVENT.clear()
+        EWS_ACCOUNT = account
+        fresh = [
+            threading.Thread(target=stream_worker, args=(account,), daemon=True),
+            threading.Thread(target=sync_worker, args=(account,), daemon=True),
+        ]
+        COLLECT_THREADS = [*lingering, *fresh]
+        for thread in fresh:
+            thread.start()
+        LOG.info(
+            "collectors restarted mailbox=%s previous=%s lingering=%d",
+            merged.get("mailbox"),
+            old_mailbox or "-",
+            len(lingering),
+        )
+
+
+def settings_overview() -> dict[str, Any]:
+    stored = load_db_settings()
+    masked = {k: ("***" if k == "password" else v) for k, v in stored.items()}
+    return {
+        "configured": bool(MAIL_SETTINGS),
+        "phase": STATE.get("phase"),
+        "account_ok": STATE.get("phase") == "running",
+        "server": MAIL_SETTINGS.get("server", ""),
+        "username": MAIL_SETTINGS.get("username", ""),
+        "mailbox": MAIL_SETTINGS.get("mailbox", ""),
+        "has_password": bool(MAIL_SETTINGS.get("password")),
+        "stored": masked,
+        "storage_limit_bytes": STATE.get("storage_limit_bytes"),
+        "storage_target_bytes": STATE.get("storage_target_bytes"),
+        "storage_used_bytes": STATE.get("storage_used_bytes"),
+        "storage_archive_bytes": STATE.get("storage_archive_bytes"),
+        "backfill_done": STATE.get("backfill_done"),
+        "total": STATE.get("total"),
+    }
+
+
+def api_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Web 设置保存入口：test=仅验证凭据；save=验证后持久化并热生效。"""
+    action = str(payload.get("action") or "save").strip().lower()
+    if action not in {"test", "save"}:
+        raise ApiError(400, "action must be test or save")
+
+    old_mailbox = MAIL_SETTINGS.get("mailbox", "")
+    fields = {k: str(payload.get(k) or "").strip() for k in ("server", "username", "mailbox")}
+    password = str(payload.get("password") or "")
+
+    merged = {**{k: v for k, v in MAIL_SETTINGS.items()}}
+    for key in ("server", "username", "mailbox"):
+        if fields[key]:
+            merged[key] = fields[key]
+    if password:
+        merged["password"] = password
+    if not password:
+        merged["password"] = load_db_settings().get("password") or MAIL_SETTINGS.get("password") or ""
+    missing = [k for k in ("server", "username", "mailbox", "password") if not merged.get(k)]
+    if missing:
+        raise ApiError(400, f"还缺这些字段: {', '.join(missing)}")
+
+    # 真实 EWS 握手验证（能摸到收件箱计数才算通过）
+    try:
+        probe = build_account(merged)
+        with PANEL_EWS_LOCK:
+            inbox_total = probe.inbox.total_count
+    except Exception as exc:
+        raise ApiError(502, f"EWS 凭据测试失败: {exc}") from exc
+
+    if action == "test":
+        return {
+            "ok": True,
+            "tested": True,
+            "mailbox": merged["mailbox"],
+            "inbox_total": inbox_total,
+            "message": "凭据有效（未保存）",
+        }
+
+    save_db_settings(merged)
+    for key, meta_key in (
+        ("max_storage", QUOTA_LIMIT_META_KEY),
+        ("target_storage", QUOTA_TARGET_META_KEY),
+    ):
+        value = payload.get(key)
+        if value not in (None, ""):
+            try:
+                meta_set(meta_key, str(int(value)))
+            except (TypeError, ValueError):
+                raise ApiError(400, "存储容量格式错误")
+    MAIL_SETTINGS.update(merged)
+    apply_db_quota()
+    churn_collectors(old_mailbox)
+    enforce_storage_limit()
+    return {
+        "ok": True,
+        "saved": True,
+        "mailbox": merged["mailbox"],
+        "message": "设置已保存并开始采集",
+    }
+
+
 def main() -> int:
     global EWS_ACCOUNT
 
@@ -2318,8 +2544,15 @@ def main() -> int:
         enforce_storage_limit()
     except Exception:
         LOG.exception("startup storage cleanup failed")
-    config = load_config()
-    MAIL_SETTINGS.update(config)
+    try:
+        config = load_config()
+        MAIL_SETTINGS.update(config)
+    except RuntimeError as exc:
+        config = None
+        update_state(phase="unconfigured", last_error=str(exc))
+        LOG.warning(
+            "%s — 在 Web 界面的设置里保存企业邮箱账号即可开始采集", exc
+        )
     LOG.info(
         "starting mailwatch-ews base=%s api=%s:%s stream_timeout=%sm "
         "sync=%ss panel=%s",
@@ -2336,33 +2569,13 @@ def main() -> int:
     api_thread = threading.Thread(target=server.serve_forever, daemon=True)
     api_thread.start()
 
-    try:
-        account = build_account(config)
-        EWS_ACCOUNT = account
-        LOG.info("EWS account created")
-        if INITIAL_BACKFILL:
-            initial_backfill(account)
-        else:
-            update_state(backfill_done=meta_get("backfill_done") == "1")
-        prime_sync_state(account)
-        if INITIAL_BACKFILL:
-            meta_set("backfill_done", "1")
-        sync_incremental(account)
-        update_state(phase="running")
-        LOG.info("initial synchronization complete")
-    except Exception:
-        update_state(phase="failed")
-        LOG.exception("initial EWS setup failed")
-        server.shutdown()
-        return 1
-
-    threads = [
-        threading.Thread(target=stream_worker, args=(account,), daemon=True),
-        threading.Thread(target=sync_worker, args=(account,), daemon=True),
-        threading.Thread(target=cleanup_worker, daemon=True),
-    ]
-    for thread in threads:
+    watch_threads = [threading.Thread(target=cleanup_worker, daemon=True)]
+    for thread in watch_threads:
         thread.start()
+
+    if config is not None:
+        ingest_start(config)
+        # 首次采集失败也保持 API 存活（phase=failed），让设置界面能纠正后重试
 
     try:
         while not STOP_EVENT.is_set():
@@ -2374,7 +2587,7 @@ def main() -> int:
         # stopwaitsecs (35s), otherwise supervisord resorts to SIGKILL.
         # Joins are sequential, so cap their *combined* wait, not each one.
         deadline = time.monotonic() + 20
-        for thread in threads:
+        for thread in [*watch_threads, *COLLECT_THREADS]:
             thread.join(timeout=max(0.1, deadline - time.monotonic()))
         server.shutdown()
         server.server_close()

@@ -8,19 +8,19 @@ services:
       db:
         condition: service_healthy
     environment:
-      # ----- mailbox (required) -----
-      MAILWATCH_EWS_SERVER: ${EWS_SERVER:?set your Exchange/EWS host}
-      MAILWATCH_EWS_USERNAME: ${EWS_USERNAME:?set DOMAIN\\user}
-      MAILWATCH_EWS_PASSWORD: ${EWS_PASSWORD:?set password}
-      MAILWATCH_EWS_MAILBOX: ${EWS_MAILBOX:?set mailbox address}
+      # ----- mailbox: 可选，全部留空即可，部署后在网页“设置”里填写并保存 -----
+      MAILWATCH_EWS_SERVER: ${EWS_SERVER:-}
+      MAILWATCH_EWS_USERNAME: ${EWS_USERNAME:-}
+      MAILWATCH_EWS_PASSWORD: ${EWS_PASSWORD:-}
+      MAILWATCH_EWS_MAILBOX: ${EWS_MAILBOX:-}
       MAILWATCH_EWS_BUILD: ${EWS_BUILD:-15.2.2562}
-      # ----- web API -----
+      # ----- web/API/UI 登录（必填）-----
       MAILWATCH_EWS_API_PORT: "18661"
       MAILWATCH_PANEL_USER: ${PANEL_USER:?set UI login user}
       MAILWATCH_PANEL_PASSWORD: ${PANEL_PASSWORD:?set UI login password}
-      # ----- postgres (matches the compose db below) -----
+      # ----- postgres（与下面 db 一致）-----
       MAILWATCH_PG_DSN: host=db port=5432 dbname=mailwatch user=mailwatch password=${POSTGRES_PASSWORD:?set pg password}
-      # ----- storage quota -----
+      # ----- 存档容量（默认值；部署后也可在网页设置里修改）-----
       MAILWATCH_MAX_STORAGE_BYTES: ${MAX_STORAGE:-100G}
       MAILWATCH_STORAGE_TARGET_BYTES: ${TARGET_STORAGE:-95G}
       MAILWATCH_CLEANUP_INTERVAL: "60"

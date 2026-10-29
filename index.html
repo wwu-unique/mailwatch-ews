@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mailwatch</title>
+<title>Mailwatch 邮箱工作台</title>
 <style>
-:root{--bg:#f5f6f8;--card:#fff;--line:#e4e6ea;--txt:#26313d;--mut:#7a8694;--acc:#2563eb;--accw:#eaf1fe}
+:root{--bg:#f5f6f8;--card:#fff;--line:#e4e6ea;--txt:#26313d;--mut:#7a8694;--acc:#2563eb;--accw:#eaf1fe;--err:#c0392b}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt)}
 header{display:flex;align-items:center;gap:14px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
 header h1{font-size:16px;margin:0;font-weight:600}
@@ -39,25 +39,41 @@ pre.body{white-space:pre-wrap;font:inherit}
 #login h2{margin:0 0 6px;font-size:16px}
 .bar{display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);align-items:center;position:sticky;top:0;background:var(--card)}
 .bar input{flex:1;padding:6px 10px;border:1px solid var(--line);border-radius:6px}
-#mask{position:fixed;inset:0;background:rgba(20,30,45,.4);display:none;align-items:center;justify-content:center;z-index:9}
-#dlg{background:var(--card);border-radius:10px;width:min(560px,92vw);max-height:86vh;display:flex;flex-direction:column}
-#dlg .hd{padding:14px 18px 6px;font-weight:600}
-#dlg .bd{padding:0 18px;overflow-y:auto}
-#dlg .ft{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-end}
+#mask,#mask2{position:fixed;inset:0;background:rgba(20,30,45,.4);display:none;align-items:center;justify-content:center;z-index:9;overflow-y:auto}
+#dlg{background:var(--card);border-radius:10px;width:min(560px,92vw);max-height:86vh;display:flex;flex-direction:column;margin:20px}
+#sdlg{background:var(--card);border-radius:10px;width:min(600px,94vw);max-height:88vh;display:flex;flex-direction:column;margin:20px}
+#dlg .hd,#sdlg .hd{padding:14px 18px 6px;font-weight:600}
+#dlg .bd,#sdlg .bd{padding:0 18px;overflow-y:auto}
+#dlg .ft,#sdlg .ft{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-end}
 #dlg input,#dlg textarea{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font:inherit;margin-bottom:8px}
+#sdlg input,#sdlg select{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font:inherit;margin-bottom:8px}
+#sdlg #s_custom{width:110px;display:inline-block;margin:0 0 0 2px}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#20313f;color:#fff;padding:8px 16px;border-radius:8px;opacity:0;transition:.3s;z-index:99;pointer-events:none}
 #replybar{display:flex;gap:8px}
+.fld{font-size:12px;color:var(--mut);margin:8px 0 2px}
+.usage{border:1px solid var(--line);border-radius:8px;padding:10px;margin:10px 0 4px}
+.usage .bar-o{height:8px;background:#eceff3;border-radius:5px;overflow:hidden}
+.usage .bar-i{height:100%;background:var(--acc);border-radius:5px;width:0%;transition:.4s}
+.usage .lab{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-top:5px}
+.usage .lab b{color:var(--txt)}
+.warn-banner,.bg-warn{background:#fff8e6;border:1px solid #f1d888;color:#8a6d3b;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+.err-banner{background:#fdeeee;border:1px solid #f1b0b0;color:var(--err);border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+.gbx{border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.gbx label{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:4px 12px;cursor:pointer;color:var(--mut)}
+.gbx label.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.gbx input[type=radio]{display:none}
+.hint{color:var(--mut);font-size:12px;margin-top:6px;line-height:1.7}
 @media(max-width:820px){main{grid-template-columns:1fr}#view{display:none}}
 </style>
 </head>
 <body>
 
 <div id="login" style="display:none">
-  <h2>Mailwatch login</h2>
+  <h2>Mailwatch 登录</h2>
   <div id="lerr" style="color:#c0392b;font-size:12px"></div>
-  <input id="lu" placeholder="User" autocomplete="username">
-  <input id="lp" type="password" placeholder="Password" autocomplete="current-password">
-  <button onclick="doLogin()">Sign in</button>
+  <input id="lu" placeholder="用户名" autocomplete="username">
+  <input id="lp" type="password" placeholder="密码" autocomplete="current-password">
+  <button onclick="doLogin()">登录</button>
 </div>
 
 <div id="app" style="display:none;flex-direction:column">
@@ -65,39 +81,79 @@ pre.body{white-space:pre-wrap;font:inherit}
   <h1>Mailwatch</h1>
   <span class="stats" id="stats"></span>
   <span class="sp"></span>
-  <button onclick="openCompose()">Compose</button>
-  <button id="mkall" onclick="markAll()">Mark all read</button>
-  <button onclick="doLogout()">Exit</button>
+  <button onclick="openSettings()">设置</button>
+  <button onclick="openCompose()">写邮件</button>
+  <button onclick="markAll()">全部已读</button>
+  <button onclick="doLogout()">退出</button>
 </header>
 <main>
   <section id="list">
     <div class="bar">
-      <input id="q" placeholder="Search subject / body / sender..." onkeydown="if(event.key=='Enter'){load(0)}">
-      <button id="unbtn" onclick="toggleUnread(this)">Unread</button>
+      <input id="q" placeholder="搜索 主题 / 正文 / 发件人..." onkeydown="if(event.key=='Enter'){load(0)}">
+      <button id="unbtn" onclick="toggleUnread(this)">只看未读</button>
     </div>
     <div id="rows"></div>
     <div class="pager">
-      <button id="prev" onclick="load(cur-1)" disabled>Prev</button>
-      <button id="next" onclick="load(cur+1)">Next</button>
+      <button id="prev" onclick="load(cur-1)" disabled>上一页</button>
+      <button id="next" onclick="load(cur+1)">下一页</button>
     </div>
   </section>
-  <section id="view"><div id="empty">Select a message</div><div id="detail" style="display:none"></div></section>
+  <section id="view"><div id="empty">选择一封邮件查看</div><div id="detail" style="display:none"></div></section>
 </main>
 </div>
 
+<!-- 撰写 -->
 <div id="mask"><div id="dlg">
-  <div class="hd">Compose message</div>
+  <div class="hd">新邮件</div>
   <div class="bd">
-    <input id="cto" placeholder="To, comma separated">
-    <input id="ccc" placeholder="Cc, optional">
-    <input id="csu" placeholder="Subject">
-    <textarea id="cbo" rows="9" placeholder="Body (plain text)"></textarea>
+    <input id="cto" placeholder="收件人，多个用逗号分隔">
+    <input id="ccc" placeholder="抄送，可选">
+    <input id="csu" placeholder="主题">
+    <textarea id="cbo" rows="9" placeholder="正文（纯文本）"></textarea>
     <div id="cerr" style="color:#c0392b;font-size:12px"></div>
   </div>
   <div class="ft">
-    <button onclick="hideDlg()">Cancel</button>
-    <button onclick="send(true)">Dry run</button>
-    <button class="pri" onclick="send(false)">Send</button>
+    <button onclick="hideDlg()">取消</button>
+    <button onclick="send(true)">试运行(不真发)</button>
+    <button class="pri" onclick="send(false)">发送</button>
+  </div>
+</div></div>
+
+<!-- 设置：企业邮箱账号 + 存档容量 -->
+<div id="mask2"><div id="sdlg">
+  <div class="hd">设置</div>
+  <div class="bd">
+    <div id="swarn"></div>
+    <div class="fld">企业的 Exchange / EWS 服务器（https 主机名）</div>
+    <input id="s_server" placeholder="例如 mail.company.com">
+    <div class="fld">登录用户名（NTLM：域\用户 或 用户名）</div>
+    <input id="s_user" placeholder="例如 CORP\user01">
+    <div class="fld">邮箱地址（主 SMTP）</div>
+    <input id="s_mailbox" placeholder="例如 user01@company.com">
+    <div class="fld">登录密码（留空 = 沿用已保存的密码）</div>
+    <input id="s_pass" type="password" placeholder="••••••••">
+    <div class="fld">邮件存档容量上限（超过后自动从最旧的邮件开始清理）</div>
+    <div class="gbx" id="quotaBox">
+      <label data-v="5368709120">5 GiB</label>
+      <label data-v="10737418240">10 GiB</label>
+      <label data-v="53687091200">50 GiB</label>
+      <label data-v="107374182400">100 GiB</label>
+      <label data-v="214748364800">200 GiB</label>
+      <label data-v="536870912000">500 GiB</label>
+      <label>自定义 <input id="s_custom" placeholder="例如 30G"></label>
+    </div>
+    <div class="usage" id="usageBox">
+      <div class="lab"><b>存档用量</b><span id="usagePct">—</span></div>
+      <div class="bar-o"><div class="bar-i" id="usageBarI"></div></div>
+      <div class="lab"><span id="usageDetail">—</span><span id="usageLimit">—</span></div>
+    </div>
+    <div class="hint">保存时会先真实连接邮箱验证账号（能读到收件箱才算通过），通过后立即生效并开始采集；更换邮箱时会对新邮箱做整箱回填。密码只保存在本机数据库里，不会显示在界面或日志中。</div>
+    <div id="serr" style="color:#c0392b;font-size:12px"></div>
+  </div>
+  <div class="ft">
+    <button onclick="closeSettings()">取消</button>
+    <button onclick="saveSettings(true)">仅测试凭据</button>
+    <button class="pri" onclick="saveSettings(false)">保存并生效</button>
   </div>
 </div></div>
 
@@ -111,9 +167,10 @@ const fmtT = s => s ? new Date(s).toLocaleString() : '';
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
 let cur=0, onlyUnread=false;
 
-function toast(m){const t=$('toast');t.textContent=m;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2500);}
+function toast(m){const t=$('toast');t.textContent=m;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2800);}
+function failBox(msg){ $('serr').textContent = msg || ''; }
 
-// ----- auth -----
+// ---------- 鉴权 ----------
 async function ping(){const r=await fetch('/api/summary',{headers:H()});return r.ok;}
 async function doLogin(){
  $('lerr').textContent='';
@@ -121,7 +178,7 @@ async function doLogin(){
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({username:$('lu').value.trim(),password:$('lp').value})});
   const j=await r.json();
-  if(!r.ok||!j.ok||!j.token)throw new Error(j.error||'login failed');
+  if(!r.ok||!j.ok||!j.token)throw new Error(j.error||'登录失败');
   localStorage.setItem('mwtoken',j.token);boot();
  }catch(e){$('lerr').textContent=e.message||String(e);}
 }
@@ -130,20 +187,20 @@ async function doLogout(){
  localStorage.removeItem('mwtoken');$('app').style.display='none';$('login').style.display='block';
 }
 
-// ----- list -----
+// ---------- 列表 ----------
 async function load(pg){
  cur=Math.max(0,pg);
  const term=$('q').value.trim();
  const url=`/api/mails?limit=50&offset=${cur*50}`+(term?`&q=${encodeURIComponent(term)}`:'');
  const r=await fetch(url,{headers:H()});
- if(!r.ok){toast('load failed: '+r.status);return;}
+ if(!r.ok){toast('加载失败：'+r.status);return;}
  const j=await r.json();
  const box=$('rows');box.innerHTML='';
  for(const it of j.items){
   const d=document.createElement('div');
   d.className='row'+(it.is_read?'':' unread');
   d.innerHTML='<div class="sub"></div><div class="meta"><span class="from"></span><span class="tm"></span></div><div class="snip"></div>';
-  d.querySelector('.sub').textContent=it.subject||'(no subject)';
+  d.querySelector('.sub').textContent=it.subject||'(无主题)';
   d.querySelector('.from').textContent=it.sender_name||it.sender||it.sender_email||'';
   d.querySelector('.tm').textContent=fmtT(it.time);
   d.querySelector('.snip').textContent=it.snippet||'';
@@ -160,99 +217,158 @@ function toggleUnread(btn){
  [...$('rows').children].forEach(n=>{if(!n.classList.contains('unread'))n.style.display=onlyUnread?'none':'';});
 }
 
-// ----- detail -----
+// ---------- 详情 ----------
 async function view(key,row){
  [...document.querySelectorAll('.row.sel')].forEach(n=>n.classList.remove('sel'));
  if(row)row.classList.add('sel');
  const r=await fetch('/api/mail/'+key,{headers:H()});
- if(!r.ok){toast('open failed: '+r.status);return;}
+ if(!r.ok){toast('打开失败：'+r.status);return;}
  const m=await r.json();
  $('empty').style.display='none';
  const det=$('detail');det.style.display='block';
  const atts=(m.attachment_items||[]).map(a=>
-   `<a class="att" href="/api/att/${key}/${a.id}?token=${encodeURIComponent(T())}" target="_blank" rel="noopener">${esc(a.filename||'(file)')} (${Math.ceil((a.size||0)/1024)}KB)</a>`).join('');
- function close(){det.innerHTML='<div id="empty" style="display:none"></div>';}
+   `<a class="att" href="/api/att/${key}/${a.id}?token=${encodeURIComponent(T())}" target="_blank" rel="noopener">${esc(a.filename||'(文件)')} (${Math.ceil((a.size||0)/1024)}KB)</a>`).join('');
  const html=m.body_html?`<iframe sandbox="" id="bd"></iframe>`:`<pre class="body"></pre>`;
- det.innerHTML=`<div id="replybar"><button id="rreply" style="display:none">Reply</button></div>
+ det.innerHTML=`<div id="replybar"><button id="rreply">回复</button></div>
    <h2 class="sj"></h2>
    <div class="hdr"></div><div class="attlers"></div>${html}`;
- det.querySelector('.sj').textContent=m.subject||'(no subject)';
+ det.querySelector('.sj').textContent=m.subject||'(无主题)';
  det.querySelector('.hdr').innerHTML=
-   `From: ${esc((m.sender_name||'')+(m.sender_email?` <${m.sender_email}>`:''))}<br>`+
-   `To: ${esc((m.recipients||[]).join(', '))}`+
-   (m.cc&&m.cc.length?`<br>Cc: ${esc(m.cc.join(', '))}`:'')+
+   `发件人: ${esc((m.sender_name||'')+(m.sender_email?` <${m.sender_email}>`:''))}<br>`+
+   `收件人: ${esc((m.recipients||[]).join(', '))}`+
+   (m.cc&&m.cc.length?`<br>抄送: ${esc(m.cc.join(', '))}`:'')+
    `<div>${fmtT(m.datetime_received||m.datetime_sent)}</div>`;
  det.querySelector('.attlers').innerHTML=atts;
  if(m.body_html){
   const f=det.querySelector('#bd');f.srcdoc=m.body_html;
   f.onload=()=>{try{f.style.height=(f.contentDocument.body.scrollHeight+24)+'px'}catch(e){}};
  }else{
-  det.querySelector('pre.body').textContent=m.body_text||'(empty)';
+  det.querySelector('pre.body').textContent=m.body_text||'(无正文)';
  }
- const rb=det.querySelector('#rreply');
- rb.style.display='';
- rb.onclick=()=>openReply(m.key,m);
+ det.querySelector('#rreply').onclick=()=>openReply(m.key,m);
  fetch('/api/mail/'+key+'/read',{method:'POST',headers:{...H(),'Content-Type':'application/json'},body:'{"read":true}'})
    .then(()=>{if(row)row.classList.remove('unread')});
 }
 
-// ----- compose -----
-function openCompose(){mask.style.display='flex';cerr.textContent='';cto.value=ccc.value=csu.value=cbo.value='';$('dlg').dataset.key='';}
+// ---------- 撰写 ----------
+function openCompose(){$('mask').style.display='flex';$('cerr').textContent='';$('cto').value=$('ccc').value=$('csu').value=$('cbo').value='';}
 function openReply(key,m){
- mask.style.display='flex';cerr.textContent='';
- cto.value=(m.sender_email||'');ccc.value='';
- csu.value=(m.subject||'').startsWith('Re:')?m.subject:'Re: '+(m.subject||'');
- cbo.value='\n\n----- Original -----\nFrom: '+(m.sender_name||m.sender_email||'')+'\nDate: '+
+ $('mask').style.display='flex';$('cerr').textContent='';
+ $('cto').value=(m.sender_email||'');$('ccc').value='';
+ $('csu').value=(m.subject||'').startsWith('Re:')?m.subject:'Re: '+(m.subject||'');
+ $('cbo').value='\n\n----- 原邮件 -----\n发件人: '+(m.sender_name||m.sender_email||'')+'\n时间: '+
    fmtT(m.datetime_received)+'\n\n'+(m.body_text||'');
- $('dlg').dataset.key=String(key);
 }
 function hideDlg(){$('mask').style.display='none';}
-class SendErr extends Error{}
 async function send(dry){
- try{
-  const toL=cbo2list($('cto').value), ccL=cbo2list($('ccc').value);
-  if(!toL.length&&!ccL.length)throw new SendErr('no recipient');
-  if(!$('csu').value.trim())throw new SendErr('subject required');
-  const mask0=($('dlg').dataset.key||'');
-  const payload=(mask0?{action:'reply'}:{action:'new'});
-  Object.assign(payload,{key:mask0?parseInt(mask0,10):undefined,to:toL,cc:ccL.length?ccL:undefined,
-    subject:$('csu').value.trim(),body:$('cbo').value,dry_run:dry});
-  const r=await fetch('/api/send',{method:'POST',headers:{...H(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  const j=await r.json();
-  if(!r.ok){throw new SendErr((j.error||'send failed'));}
-  toast(dry?'Dry run OK':'Sent');
-  hideDlg();
-  load(0);
- }catch(e){
-  cerr.textContent=e.message||String(e);
- }
+ $('cerr').textContent='';
+ const toL=($('cto').value||'').split(',').map(s=>s.trim()).filter(Boolean);
+ const ccL=($('ccc').value||'').split(',').map(s=>s.trim()).filter(Boolean);
+ if(!toL.length&&!ccL.length){$('cerr').textContent='至少填写一位收件人';return;}
+ if(!$('csu').value.trim()){$('cerr').textContent='主题必填';return;}
+ const r=await fetch('/api/send',{method:'POST',headers:{...H(),'Content-Type':'application/json'},body:JSON.stringify({
+   action:'new', to:toL, cc:ccL.length?ccL:null,
+   subject:$('csu').value.trim(), body:$('cbo').value, dry_run:dry})});
+ const j=await r.json();
+ if(!r.ok){$('cerr').textContent=j.error||'发送失败';return;}
+ toast(dry?'试运行成功（未真发）':'发送成功');hideDlg();load(0);
 }
 
-// fixed: name
-function cbo2list(raw){
- return raw.split(',').map(s=>s.trim()).filter(Boolean);
-}
-
+// ---------- 全部已读 ----------
 async function markAll(){
  try{
   const r=await fetch('/api/mails/read',{method:'POST',headers:H()});
-  const j=await r.json();
-  toast('marked '+ (j.updated??0) +' read');
- }catch(e){toast('mark-all failed');}
- load(0);refreshSummary();
+  const j=await r.json();toast('已标记 '+(j.updated??0)+' 封已读');
+  load(0);
+ }catch(e){toast('全部已读失败');}
+ refreshSummary();
 }
 
-// ----- status / boot -----
+// ---------- 设置 ----------
+const PRESETS=[10737418240,53687091200,107374182400,214748364800,536870912000];
+function fmtGB(b){if(!b&&b!==0)return'—';const g=b/(1024**3);return (Number.isInteger(g)?String(g):g.toFixed(1))+' GiB';}
+function fmtB(b){return b>=1024**3?fmtGB(b):(Math.ceil(b/(1024**2))||0)+' MiB';}
+function parseQuota(raw){
+ const s=String(raw).trim();
+ let m;
+ if(m=s.match(/^([0-9.]+)\s*G/i))return Math.round(parseFloat(m[1])*1024**3);
+ if(m=s.match(/^([0-9.]+)\s*(GiB)/i))return Math.round(parseFloat(m[1])*1024**3);
+ if(m=s.match(/^([0-9.]+)\s*B$/i))return parseInt(m[1],10);
+ const n=parseInt(s,10);
+ if(!isNaN(n)&&s===String(n))return n;
+ throw new Error('bad size');
+}
+function pickQuota(){
+ const custom=($('s_custom').value||'').trim();
+ if(custom)return custom.trim();
+ const sel=document.querySelector('#quotaBox label.on');
+ return sel&&sel.dataset.v?sel.dataset.v:'';
+}
+async function openSettings(){
+ $('mask2').style.display='flex';failBox('');
+ let s={};
+ try{ s=await (await fetch('/api/settings',{headers:H()})).json(); }catch(e){}
+ $('s_server').value=s.server||'';
+ $('s_user').value=s.username||'';
+ $('s_mailbox').value=s.mailbox||'';
+ $('s_pass').value='';$('s_pass').placeholder=s.has_password?'已保存（留空不变）':'••••••••';
+ let warn='';
+ if(!s.configured)warn+='<div class="warn-banner">邮箱还未配置：在下面填写企业的 Exchange/EWS 账号并保存，即可开始采集。</div>';
+ if(s.phase==='failed')warn+='<div class="err-banner">当前采集状态异常（原因见顶部状态栏或最近错误）。修正账号后重新「保存并生效」即可重试。</div>';
+ $('swarn').innerHTML=warn;
+ // 用量条
+ const used=s.storage_used_bytes||0, limit=s.storage_limit_bytes||0;
+ const pct=limit?Math.min(100,Math.round(used/limit*100)):(used?100:0);
+ $('usageBarI').style.width=(limit?pct:0)+'%';
+ $('usagePct').textContent=limit?pct+'%':'—';
+ $('usageDetail').textContent='已用 '+fmtB(used)+(s.storage_archive_bytes?'（磁盘归档 '+fmtB(s.storage_archive_bytes)+'）':'');
+ $('usageLimit').textContent=limit?('上限 '+fmtGB(limit)):'未设置';
+ // 配额预选
+ document.querySelectorAll('#quotaBox label').forEach(l=>l.classList.remove('on'));
+ const matched=limit?document.querySelector(`#quotaBox label[data-v="${limit}"]`):null;
+ if(matched){matched.classList.add('on');$('s_custom').value='';}
+ else if(limit){$('s_custom').value=fmtGB(limit).replace(' GiB','G');document.querySelector('#quotaBox label:last-of-type').classList.add('on');}
+ // 选项交互
+ document.querySelectorAll('#quotaBox label[data-v]').forEach(l=>{
+   l.onclick=()=>{document.querySelectorAll('#quotaBox label').forEach(x=>x.classList.remove('on'));l.classList.add('on');$('s_custom').value='';};
+ });
+ $('s_custom').oninput=()=>{document.querySelectorAll('#quotaBox label').forEach(x=>x.classList.remove('on'));};
+}
+function closeSettings(){$('mask2').style.display='none';}
+async function saveSettings(testOnly){
+ failBox('');
+ const payload={action:testOnly?'test':'save',
+   server:$('s_server').value.trim(), username:$('s_user').value.trim(),
+   mailbox:$('s_mailbox').value.trim(), password:$('s_pass').value||null};
+ const q=pickQuota();
+ if(!testOnly&&q){
+  if(q)try{payload.max_storage=parseQuota(q)}catch(e){failBox('容量格式无法识别：'+q);return;}
+  if(!q&&!payload.max_storage)failBox('未选择容量（可留空保持默认）');
+ }
+ try{
+  const r=await fetch('/api/settings',{method:'POST',headers:{...H(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await r.json();
+  if(!r.ok){failBox(j.error||('失败 '+r.status));return;}
+  toast(j.message||(testOnly?'测试成功（未保存）':'已保存'));
+  if(!testOnly)closeSettings();
+  refreshSummary();
+ }catch(e){failBox(e.message||String(e));}
+}
+
+// ---------- 状态栏 / 启动 ----------
 async function refreshSummary(){
  try{
   const r=await fetch('/api/summary',{headers:H()});
   if(!r.ok)return;
   const s=await r.json();
+  if(!s.mailbox){
+   $('stats').textContent='○ 邮箱未配置 — 点右上角「设置」填写企业邮箱即可开始采集';
+   return;
+  }
   const lig=s.source_ok?'●':'○';
-  let t=`${lig} ${s.mailbox||''}`;
-  t+=`  total ${s.total} | unread ${s.unread} | attachments ${s.attachments}`;
-  if(s.latest_time)t+=` | latest ${fmtT(s.latest_time)}`;
-  if(s.last_error)t+=` | ERROR: ${s.last_error}`;
+  let t=`${lig} ${s.mailbox}  共 ${s.total} 封 | 未读 ${s.unread} | 附件 ${s.attachments}`;
+  if(s.latest_time)t+=` | 最新 ${fmtT(s.latest_time)}`;
+  if(s.last_error)t+=` | 最近异常: ${s.last_error}`;
   $('stats').textContent=t;
   $('stats').title=t;
  }catch(e){}
@@ -263,6 +379,10 @@ async function boot(){
  $('login').style.display='none';
  $('app').style.display='flex';
  load(0);refreshSummary();
+ try{
+  const s=await (await fetch('/api/settings',{headers:H()})).json();
+  if(!s.configured||s.phase==='failed')openSettings();
+ }catch(e){}
  if(window.__hid)clearInterval(window.__hid);
  window.__hid=setInterval(refreshSummary,15000);
 }

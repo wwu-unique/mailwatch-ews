@@ -15,7 +15,9 @@
 - **PostgreSQL 存储** — 元数据、正文全文、同步状态与日志，`pg_trgm` 模糊搜索（主题/正文/发件人）
 - **存储配额** — 超限自动从最旧开始清理（默认 100 GiB 逻辑配额，清理至 95 GiB），孤儿文件清扫、去重 blob 引用计数删除
 - **Web UI** — 单文件 `index.html`，零 CDN / 零外部资源：登录、摘要栏、分页邮件列表与搜索、HTML 正文沙箱 iframe 渲染、附件下载、内联图片预览、撰写 / 回复 / 试运行发送
-- **API 鉴权** — token 或用户名/密码两种方式（`X-Panel-Token` 请求头）
+- **Web 设置向导** — 部署完成后在「设置」里登录自己的企业邮箱（服务器/NTLM 用户名/密码/邮箱地址），保存即生效，采集线程无停机热切换；换邮箱自动对新邮箱整箱回填
+- **界面可选存档容量** — 设置页一键选择存档上限（5/10/50/100/200/500 GiB 或自定义，如 `30G`），实时显示当前用量进度条，超限自动从最旧开始清理
+- **API 鉴权** — token 或用户名/密码两种方式（`X-Panel-Token` 请求头）；整个界面为中文单文件，无任何外部资源
 
 ## 协议要求
 
@@ -54,11 +56,16 @@
 git clone https://github.com/wwu-unique/mailwatch-ews.git
 cd mailwatch-ews
 cp .env.example .env
-$EDITOR .env          # 填邮箱账号、UI 登录账号、数据库密码
+$EDITOR .env    # 至少填 UI 登录账号(db/UI 密码)；邮箱账号可以不填
 docker compose up -d --build
 ```
 
 然后打开 `http://localhost:18661/`（`MAIL_PORT`），用 `PANEL_USER` / `PANEL_PASSWORD` 登录。
+
+**两种入门路径：**
+
+- **网页配置（推荐，默认路径）**：`.env` 里只填 UI 密码与数据库密码，邮箱账号留空。首次打开界面会自动弹出「设置」，在界面里填写企业的 Exchange 服务器、NTLM 用户名、密码、邮箱地址，选一个存档容量上限，保存并生效——服务会先真实验证凭据、随后自动回填收件箱并实时采集，无需重启容器。
+- **环境变量 / config.json（脚本化部署）**：像过去一样在 `.env` 中预置邮箱账号，服务启动后直接采集。
 
 Compose 启动两个容器：
 
@@ -104,7 +111,8 @@ Compose 启动两个容器：
 | `MAILWATCH_PANEL_USER` / `MAILWATCH_PANEL_PASSWORD` | Web UI / API 登录 |
 | `MAILWATCH_PANEL_TOKEN` | 静态 token 鉴权（与账号二选一） |
 | `MAILWATCH_PANEL_SESSION_TTL` | 会话有效期秒数，默认 12 小时 |
-| `MAILWATCH_MAX_STORAGE_BYTES` | 逻辑内容配额，默认 `100G` |
+| `MAILWATCH_MAX_STORAGE_BYTES` | 逻辑内容配额，默认 `100G`（设置页保存后以设置页为准） |
+| `/api/settings`（Web 设置，数据存在 PG meta 表） | 界面保存的账号与配额，优先级高于文件与环境变量；`GET /api/settings` 查看，`POST {action: test/save}` 修改 |
 | `MAILWATCH_STORAGE_TARGET_BYTES` | 清理后的目标用量，默认 `95G` |
 | `MAILWATCH_CLEANUP_INTERVAL` | 清理器周期秒数，默认 `60` |
 
@@ -142,13 +150,16 @@ Compose 启动两个容器：
 | POST | `/api/mail/<key>/read` | `{read: true|false}` 单封标记已读/未读 |
 | POST | `/api/mails/read` | 全部标记已读 |
 | POST | `/api/send` | 新邮件 / 回复 / 全部回复，支持 `dry_run` 试运行 |
+| GET | `/api/settings` | 当前邮箱配置、配额与用量（不含明文密码） |
+| POST | `/api/settings` | `{action:"test"\|"save", server, username, password, mailbox, max_storage?}` 测试/保存账号与存档容量 |
 
 ## 安全说明
 
 - Docker 镜像在容器内以 root 运行，因为归档路径与 DSN 文件依赖 `0600/0700` 文件位作为首要防线（上游托管部署保留了这个行为）。请把 `/app/data` 挂到宿主机权限收紧的路径上。
 - Web UI 把 HTML 正文放进**沙箱 iframe**（`sandbox=""`）渲染，邮件正文里的脚本无法触达应用源。
 - 任何对外可达的部署务必配置 `PANEL_USER`/`PANEL_PASSWORD`（或 `PANEL_TOKEN`）；两者都没配时 API 是开放的。
-- 密钥只从环境变量或 `pg.env`/`config.json` 文件读取，绝不写日志、不上 API 回显、不进源码。
+- 密钥只从环境变量、`pg.env`/`config.json` 文件或设置页读取，绝不写日志、不上 API 回显（`GET` 返回脱敏信息）、不进源码。
+- 设置页保存的邮箱密码存放在本机 PostgreSQL 的 `meta` 表中；请以适用的精细权限保护数据库（Volume 归属宿主机本地盘）。
 
 ## 本地开发
 
