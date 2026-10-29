@@ -313,6 +313,8 @@ def load_config() -> dict[str, Any]:
 
 def ews_build() -> Any:
     """Explicit server build hint (exchangelib skips autodiscover versioning)."""
+    from exchangelib.version import Build
+
     raw = os.environ.get("MAILWATCH_EWS_BUILD", "15.2.2562")
     parts = tuple(int(item) for item in raw.split(".") if item.isdigit())
     if not parts:

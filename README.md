@@ -131,6 +131,23 @@ Everything above can be provided with environment variables instead:
 | `MAILWATCH_STORAGE_TARGET_BYTES` | cleanup target below quota, default `95G` |
 | `MAILWATCH_CLEANUP_INTERVAL` | cleaner period in seconds, default `60` |
 
+### First run
+
+On a fresh deployment the service:
+
+1. connects to EWS, backfills the existing inbox (one pass, ~1-2 s per
+   message depending on attachments),
+2. then performs a *sync-state anchoring* walk (`prime_sync_state`) which
+   replays the folder once to obtain the EWS change watermark — expect
+   roughly the same order of time as the backfill again for large
+   mailboxes (hundreds of round-trips),
+3. only afterwards starts the streaming subscription, the incremental
+   sync fallback and the storage cleaner (quota metrics stay at their
+   initial values until then).
+
+All three later stages reuse the same code paths as the reference
+production deployment; nothing is realm-specific.
+
 ### Storage quota semantics
 
 When disk+DB usage counts up to `MAILWATCH_MAX_STORAGE_BYTES`, the cleaner
