@@ -1,210 +1,166 @@
 # mailwatch-ews
 
-A real-time EWS mailbox collector, archive and lightweight web workbench.
+一个实时 EWS 邮箱采集、归档与轻量网页工作台。
 
-Built for mailboxes whose server keeps **IMAP / POP3 / SMTP blocked** while
-**EWS (Exchange Web Services) over HTTPS** stays up — a common setup on
-corporate Exchange 2013/2016/2019 deployments. The service connects over
-EWS, keeps a *streaming subscription* for push-style realtime updates with a
-periodic incremental fallback, stores every message it sees and exposes a
-small, read-mostly HTTP API plus a single-page web UI (login, search, read,
-attachments, compose/reply).
+专为那些服务器上 **IMAP / POP3 / SMTP 被封禁**、但 **EWS（Exchange Web Services）over HTTPS** 依然开放的企业邮箱设计——Exchange 2013/2016/2019 常见的封锁策略。本服务通过 EWS 连接邮箱，保持 *streaming subscription*（流式订阅）以获得推送级别的实时更新，并叠加周期性增量兜底同步，把看到的每一封邮件都存下来，同时提供一个精简的 HTTP API 和单页 Web 工作台（登录、搜索、阅读、附件下载、撰写/回复）。
 
-> This is the generic/open-source packaging of a mailbox workbench. Internal
-> dashboards, ops board and panel synchronization are **not** part of this
-> repository — only the mailbox service itself (collect / store / view /
-> send).
+> 这是通用化后的开源打包版本。内部运营面板、值班看板、面板同步等 **不属于本仓库的内容**——这里只有邮箱服务本体（采集 / 存储 / 查看 / 发送）。
 
-## Features
+## 功能特性
 
-- **EWS realtime ingest** — streaming subscription push notifications,
-  automatic re-subscribe, 20-minute stream cycles
-- **Fallback incremental sync** every 5 minutes (configurable) using
-  change-key / sync state, surviving short outages
-- **Initial backfill** of existing inbox contents on first run
-- **Content-addressed archive** — raw MIME stored as `.eml.gz`, all
-  attachments stored by SHA-256, deduped across messages
-- **PostgreSQL storage** for metadata, full bodies, sync state and logs,
-  with `pg_trgm` fuzzy search on subject / body / sender
-- **Storage quota** with automatic oldest-first cleanup (default 100 GiB
-  logical quota, cleaning down to 95 GiB), orphan-file sweeping and
-  reference-safe deletion of deduped blobs
-- **Web UI** — single `index.html`, no CDN/external assets: login,
-  summary bar, paginated mailbox list with search, server-side bodies
-  rendered in a sandboxed iframe, attachment download, inline image
-  preview, compose / reply / dry-run sending
-- **Read-only-friendly API** with token or user/password authentication
-  (`X-Panel-Token` header)
+- **EWS 实时采集** — 流式订阅推送通知，自动重订阅，20 分钟流周期
+- **增量兜底同步** — 每 5 分钟（可配置）基于 sync state 增量拉取，扛短时故障
+- **首启回填** — 第一次运行即把收件箱已有内容全部入库
+- **内容寻址归档** — 原始 MIME 存为 `.eml.gz`，全部附件按 SHA-256 存储，跨邮件去重
+- **PostgreSQL 存储** — 元数据、正文全文、同步状态与日志，`pg_trgm` 模糊搜索（主题/正文/发件人）
+- **存储配额** — 超限自动从最旧开始清理（默认 100 GiB 逻辑配额，清理至 95 GiB），孤儿文件清扫、去重 blob 引用计数删除
+- **Web UI** — 单文件 `index.html`，零 CDN / 零外部资源：登录、摘要栏、分页邮件列表与搜索、HTML 正文沙箱 iframe 渲染、附件下载、内联图片预览、撰写 / 回复 / 试运行发送
+- **API 鉴权** — token 或用户名/密码两种方式（`X-Panel-Token` 请求头）
 
-## Protocol requirements
+## 协议要求
 
-The whole design assumes the classic enterprise lock-down pattern:
+整套设计针对经典的"企业邮件封锁"场景：
 
-| Protocol | Ports | Status in target environments |
+| 协议 | 端口 | 目标环境状态 |
 |---|---|---|
-| OWA / EWS / ActiveSync / Autodiscover | 443 | **works — only data channel used** |
-| IMAP / POP3 / SMTP submission | 143/993/110/995/465/587 | usually blocked upstream |
-| SMTP inbound (MX) | 25 | open (receive path) |
-| SMTP AUTH sending | 25 | often rejected by mail gateway |
+| OWA / EWS / ActiveSync / Autodiscover | 443 | **可用 — 唯一取数通道** |
+| IMAP / POP3 / SMTP submission | 143/993/110/995/465/587 | 通常被上游封禁 |
+| SMTP 入站（MX） | 25 | 开放（收信路径） |
+| SMTP AUTH 发信 | 25 | 常被邮件网关拒绝 |
 
-If your server offers IMAP cleanly, you arguably don't need this service.
-If it doesn't, this is your reading tool.
+如果你的邮箱提供干净的 IMAP，大概率不需要本服务；如果没有，这就是你的阅读工具。
 
-## Architecture
+## 架构
 
 ```text
-┌────────────── mailwatch-ews (single python process) ─────────────┐
-│  exchangelib ─► EWS :443 (NTLM)                                  │
-│   ├── streaming subscription       (push rows into event_log)    │
-│   └── incremental sync every N s   (fallback + backfill)          │
-│  storage                                                          │
-│   ├── Postgres   messages / attachments / meta / ingest_log /     │
-│   │              event_log                                        │
-│   └── ../data/archive                                             │
-│        ├── mime/YYYY/MM/<sha256>.eml.gz                           │
-│        └── attachments/<sha2>/<sha256>  (deduped)                 │
-│  HTTP API  :18661  JSON + static index.html                       │
-│  cleaner    storage quota enforcement every 60 s                  │
-└───────────────────────────────────────────────────────────────────┘
+┌──────────────── mailwatch-ews（单 Python 进程）────────────────┐
+│  exchangelib ─► EWS :443 (NTLM)                                │
+│   ├── streaming subscription        （推送写入 event_log）      │
+│   └── 每 N 秒增量同步               （兜底 + 回填）             │
+│  存储                                                           │
+│   ├── PostgreSQL   messages / attachments / meta / ingest_log / │
+│   │                event_log                                    │
+│   └── ../data/archive                                           │
+│        ├── mime/YYYY/MM/<sha256>.eml.gz                         │
+│        └── attachments/<sha2>/<sha256>  （去重）                 │
+│  HTTP API  :18661  JSON + 静态 index.html                       │
+│  清理器     每 60 秒执行配额检查与最旧消息删除                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Quick start (Docker Compose, one command)
+## 快速开始（Docker Compose 一条命令）
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/wwu-unique/mailwatch-ews.git
 cd mailwatch-ews
 cp .env.example .env
-$EDITOR .env          # fill mailbox, UI login and database password
+$EDITOR .env          # 填邮箱账号、UI 登录账号、数据库密码
 docker compose up -d --build
 ```
 
-Then open `http://localhost:18661/` (`MAIL_PORT`), log in with
-`PANEL_USER` / `PANEL_PASSWORD`.
+然后打开 `http://localhost:18661/`（`MAIL_PORT`），用 `PANEL_USER` / `PANEL_PASSWORD` 登录。
 
-The compose stack runs two containers:
+Compose 启动两个容器：
 
-- `mail` — the service (exposes the configured port)
-- `db` — PostgreSQL 18 with its own volume
+- `mail` — 本服务（暴露配置端口）
+- `db` — PostgreSQL 18，自带数据卷
 
-All mail metadata lives in the `mailwatch` database; raw MIME and
-attachments live in `./data/archive` (bind-mounted `./data`).
+所有邮件元数据存在 `mailwatch` 数据库；原始 MIME 与附件在 `./data/archive`（宿主机 `./data` bind 挂载）。
 
-## Configuration
+## 配置说明
 
-Configuration is resolved from an optional JSON file plus environment
-overrides, in that order:
+配置由一个可选 JSON 文件 + 环境变量覆盖组成（后者优先）：
 
 ```json5
-// /app/config.json (set MAILWATCH_CONFIG=/path/to/config.json to relocate)
+// /app/config.json（用 MAILWATCH_CONFIG=/path/to/config.json 可换路径）
 {
-  "server":   "mail.example.com",     // EWS host, https only
-  "username": "DOMAIN\\user",         // NTLM login
+  "server":   "mail.example.com",     // EWS 主机，仅 https
+  "username": "DOMAIN\\user",         // NTLM 登录
   "password": "…",
-  "mailbox":  "user@example.com"      // primary SMTP address
+  "mailbox":  "user@example.com"      // 主 SMTP 地址
 }
 ```
 
-Everything above can be provided with environment variables instead:
+以上字段也都可以不写文件，直接用环境变量：
 
-| Variable | Meaning |
+| 变量 | 含义 |
 |---|---|
-| `MAILWATCH_EWS_SERVER` | Exchange host serving EWS over https |
-| `MAILWATCH_EWS_USERNAME` | NTLM user, `DOMAIN\user` |
-| `MAILWATCH_EWS_PASSWORD` | NTLM password |
-| `MAILWATCH_EWS_MAILBOX` | primary SMTP mailbox address |
-| `MAILWATCH_EWS_BUILD` | optional server build hint, e.g. `15.2.2562` (Exchange 2019) |
-| `MAILWATCH_EWS_API_PORT` | HTTP API port, default `18661` |
-| `MAILWATCH_EWS_API_HOST` | bind address, default `127.0.0.1` (compose sets `0.0.0.0`) |
-| `MAILWATCH_EWS_DIR` | working dir, default `/app` |
-| `MAILWATCH_CONFIG` | path to config JSON, default `/app/config.json` |
-| `MAILWATCH_PG_DSN` | PostgreSQL connection string (or `pg.env` file next to the code) |
-| `MAILWATCH_EWS_SYNC_INTERVAL` | fallback sync period in seconds, default `300` |
-| `MAILWATCH_EWS_STREAM_TIMEOUT` | streaming subscription minutes, default `20` |
-| `MAILWATCH_EWS_BACKFILL` | `1` = ingest existing inbox on first start |
-| `MAILWATCH_EWS_LOG_LEVEL` | log level, default `INFO` |
-| `MAILWATCH_MIN_KEEP_MESSAGES` | minimum messages the cleaner must keep, default `1` |
-| `MAILWATCH_CLEANUP_BATCH` | max rows deleted per cleanup batch |
-| `MAILWATCH_PANEL_USER` / `MAILWATCH_PANEL_PASSWORD` | UI/API login |
-| `MAILWATCH_PANEL_TOKEN` | static API token (alternative to user/password) |
-| `MAILWATCH_PANEL_SESSION_TTL` | session lifetime in seconds, default 12 h |
-| `MAILWATCH_MAX_STORAGE_BYTES` | logical content quota, default `100G` |
-| `MAILWATCH_STORAGE_TARGET_BYTES` | cleanup target below quota, default `95G` |
-| `MAILWATCH_CLEANUP_INTERVAL` | cleaner period in seconds, default `60` |
+| `MAILWATCH_EWS_SERVER` | 提供 EWS 的 Exchange 主机 |
+| `MAILWATCH_EWS_USERNAME` | NTLM 用户，`域名\用户` |
+| `MAILWATCH_EWS_PASSWORD` | NTLM 密码 |
+| `MAILWATCH_EWS_MAILBOX` | 主 SMTP 邮箱地址 |
+| `MAILWATCH_EWS_BUILD` | 可选服务器版本号提示，如 `15.2.2562`（Exchange 2019） |
+| `MAILWATCH_EWS_API_PORT` | HTTP API 端口，默认 `18661` |
+| `MAILWATCH_EWS_API_HOST` | 监听地址，默认 `127.0.0.1`（Compose 设 `0.0.0.0`） |
+| `MAILWATCH_EWS_DIR` | 工作目录，默认 `/app` |
+| `MAILWATCH_CONFIG` | 配置 JSON 路径，默认 `/app/config.json` |
+| `MAILWATCH_PG_DSN` | PostgreSQL 连接串（或代码同目录 `pg.env` 文件） |
+| `MAILWATCH_EWS_SYNC_INTERVAL` | 兜底同步周期秒数，默认 `300` |
+| `MAILWATCH_EWS_STREAM_TIMEOUT` | 流式订阅分钟数，默认 `20` |
+| `MAILWATCH_EWS_BACKFILL` | 数字 `1` = 首次启动回填收件箱 |
+| `MAILWATCH_EWS_LOG_LEVEL` | 日志级别，默认 `INFO` |
+| `MAILWATCH_MIN_KEEP_MESSAGES` | 清理器必须保留的最少消息数，默认 `1` |
+| `MAILWATCH_CLEANUP_BATCH` | 每批清理删除的最大行数 |
+| `MAILWATCH_PANEL_USER` / `MAILWATCH_PANEL_PASSWORD` | Web UI / API 登录 |
+| `MAILWATCH_PANEL_TOKEN` | 静态 token 鉴权（与账号二选一） |
+| `MAILWATCH_PANEL_SESSION_TTL` | 会话有效期秒数，默认 12 小时 |
+| `MAILWATCH_MAX_STORAGE_BYTES` | 逻辑内容配额，默认 `100G` |
+| `MAILWATCH_STORAGE_TARGET_BYTES` | 清理后的目标用量，默认 `95G` |
+| `MAILWATCH_CLEANUP_INTERVAL` | 清理器周期秒数，默认 `60` |
 
-### First run
+### 首次启动
 
-On a fresh deployment the service:
+全新部署时流程如下：
 
-1. connects to EWS, backfills the existing inbox (one pass, ~1-2 s per
-   message depending on attachments),
-2. then performs a *sync-state anchoring* walk (`prime_sync_state`) which
-   replays the folder once to obtain the EWS change watermark — expect
-   roughly the same order of time as the backfill again for large
-   mailboxes (hundreds of round-trips),
-3. only afterwards starts the streaming subscription, the incremental
-   sync fallback and the storage cleaner (quota metrics stay at their
-   initial values until then).
+1. 连接 EWS，把现有收件箱全部回填（约每封 1–2 秒，视附件而定）；
+2. 执行 *同步状态锚定*（`prime_sync_state`），把文件夹重放一遍拿到 EWS 变更水位——大邮箱（数百封起）耗时与回填同一量级（数百次往返）；
+3. 完成后才启动流式订阅、增量同步兜底与存储清理器（配额统计在此之前保持初始值）。
 
-All three later stages reuse the same code paths as the reference
-production deployment; nothing is realm-specific.
+后续三阶段与参考生产部署共用同一套代码路径，没有任何针对特定环境的东西。
 
-### Storage quota semantics
+### 存储配额语义
 
-When disk+DB usage counts up to `MAILWATCH_MAX_STORAGE_BYTES`, the cleaner
-deletes the oldest messages in batches until usage is back at
-`MAILWATCH_STORAGE_TARGET_BYTES` to avoid a thrash loop. Database rows go
-first; content-addressed blobs are removed only when no message or
-attachment references them. Cleanups run at startup and every
-`MAILWATCH_CLEANUP_INTERVAL` seconds and are reported on `/api/summary`
-under `storage_*` / `last_cleanup*`.
+用量（磁盘 + 数据库）达到 `MAILWATCH_MAX_STORAGE_BYTES` 后，清理器按批删除最旧的邮件，直到用量回落至 `MAILWATCH_STORAGE_TARGET_BYTES`，避免反复触发抖动。先删数据库行；内容寻址 blob 只有在不再被任何消息或附件引用时才删除（保留去重共享）。清理在启动时和每 `MAILWATCH_CLEANUP_INTERVAL` 秒各跑一次，结果通过 `/api/summary` 的 `storage_*` / `last_cleanup*` 字段暴露。
 
 ## HTTP API
 
-All endpoints answer JSON unless stated otherwise. When authentication is
-configured, requests must send `X-Panel-Token: <session-or-token>` or
-`?token=`.
+除特别说明外，所有端点返回 JSON。配置鉴权后，请求必须带 `X-Panel-Token: <session-or-token>` 或 `?token=`。
 
-| Method | Path | Description |
+| 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/login` | `{username, password}` → `{ok, token, expires_in}` |
-| POST | `/api/logout` | drop current session |
-| GET | `/` `/health` `/api/health` | summary + sync/stream/storage state |
-| GET | `/api/summary` | mailbox totals, unread, newest message, quota use |
-| GET | `/api/mails?limit&offset&q` | paginated list, `q` = full-text search |
-| GET | `/api/mail/<key>` | full message: headers, bodies, attachment list |
-| GET | `/api/att/<key>/<attid>` | download attachment |
-| GET | `/api/img/<key>/<attid>` | inline image with friendly disposition |
-| GET | `/api/mime/<key>` | raw archived `.eml.gz` content |
-| GET | `/api/tags` | distinct message categories |
-| GET | `/api/log?limit` | ingest log tail |
-| POST | `/api/mail/<key>/read` | `{read: true|false}` mark one |
-| POST | `/api/mails/read` | mark all read |
-| POST | `/api/send` | compose / reply / reply_all, supports `dry_run` |
+| POST | `/api/logout` | 销毁当前会话 |
+| GET | `/` `/health` `/api/health` | 摘要 + 同步/流式/存储状态 |
+| GET | `/api/summary` | 邮件总数、未读数、最新一封、配额用量 |
+| GET | `/api/mails?limit&offset&q` | 分页列表，`q` = 全文搜索 |
+| GET | `/api/mail/<key>` | 完整邮件：头、正文、附件列表 |
+| GET | `/api/att/<key>/<attid>` | 下载附件 |
+| GET | `/api/img/<key>/<attid>` | 内联图片（Disposition 友好） |
+| GET | `/api/mime/<key>` | 归档的原始 `.eml.gz` 内容 |
+| GET | `/api/tags` | 已见的邮件分类去重列表 |
+| GET | `/api/log?limit` | 采集日志尾部 |
+| POST | `/api/mail/<key>/read` | `{read: true|false}` 单封标记已读/未读 |
+| POST | `/api/mails/read` | 全部标记已读 |
+| POST | `/api/send` | 新邮件 / 回复 / 全部回复，支持 `dry_run` 试运行 |
 
-## Security notes
+## 安全说明
 
-- The Docker image runs as root inside the container because the archive
-  paths and the DSN file rely on `0600/0700` file modes as their primary
-  guard (the upstream deployment kept this behavior on host supervision).
-  Mount `/app/data` on a host path with restrictive permissions.
-- The web UI renders HTML bodies inside a **sandboxed iframe**
-  (`sandbox=""`), so mail-body scripts cannot reach the app's origin.
-- Set `PANEL_USER`/`PANEL_PASSWORD` (or `PANEL_TOKEN`) in any reachable
-  deployment; the API is open when neither is configured.
-- Secret values are read from env or `pg.env`/`config.json` files and are
-  never logged, echoed in APIs, or copied into the source.
+- Docker 镜像在容器内以 root 运行，因为归档路径与 DSN 文件依赖 `0600/0700` 文件位作为首要防线（上游托管部署保留了这个行为）。请把 `/app/data` 挂到宿主机权限收紧的路径上。
+- Web UI 把 HTML 正文放进**沙箱 iframe**（`sandbox=""`）渲染，邮件正文里的脚本无法触达应用源。
+- 任何对外可达的部署务必配置 `PANEL_USER`/`PANEL_PASSWORD`（或 `PANEL_TOKEN`）；两者都没配时 API 是开放的。
+- 密钥只从环境变量或 `pg.env`/`config.json` 文件读取，绝不写日志、不上 API 回显、不进源码。
 
-## Development
+## 本地开发
 
 ```bash
 python -m venv ./.venv && source ./.venv/bin/activate
 pip install -r requirements.txt
-# point MAILWATCH_PG_DSN at a local PostgreSQL
+# MAILWATCH_PG_DSN 指向本机 PostgreSQL
 MAILWATCH_EWS_DIR=/app MAILWATCH_EWS_API_HOST=127.0.0.1 MAILWATCH_EWS_API_PORT=18661 \
   MAILWATCH_EWS_SERVER=… MAILWATCH_EWS_USERNAME=… MAILWATCH_EWS_PASSWORD=… \
   MAILWATCH_EWS_MAILBOX=… python ews_worker.py
 ```
 
-## License
+## 许可证
 
-MIT — see `LICENSE`.
+MIT — 见 `LICENSE`。
