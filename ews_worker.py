@@ -2547,6 +2547,7 @@ def main() -> int:
     )
     install_signal_handlers()
     init_db()
+    apply_db_quota()
     try:
         enforce_storage_limit()
     except Exception:
